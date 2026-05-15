@@ -144,6 +144,12 @@ app.registerExtension({
                     // Forward screenshot to ComfyUI upload endpoint.
                     uploadScreenshot(msg.image).catch(console.error);
                 }
+
+                if (msg.type === "FILE_UPLOADED") {
+                    // A file was drag-dropped into the viewer and uploaded to input/3d/.
+                    // Refresh the model_file dropdown and auto-select the new file.
+                    refreshModelDropdown(msg.filename).catch(console.error);
+                }
             });
 
             // ── Screenshot upload ─────────────────────────────────────────────
@@ -242,6 +248,33 @@ app.registerExtension({
                 const upQuat = getUpAxisQuat();
                 if (upQuat) {
                     sendToViewer({ type: "SET_UP_AXIS", upQuat });
+                }
+            }
+
+            // ── Dropdown refresh after drag-and-drop upload ───────────────────
+            async function refreshModelDropdown(filename) {
+                try {
+                    // Ask ComfyUI for the current file list for this input type.
+                    const res = await fetch("/object_info/CameraControlLoad3D");
+                    if (!res.ok) return;
+                    const info = await res.json();
+                    const newList = info?.CameraControlLoad3D?.input?.required?.model_file?.[0];
+                    if (!Array.isArray(newList)) return;
+
+                    const modelWidget = node.widgets?.find(w => w.name === "model_file");
+                    if (!modelWidget) return;
+
+                    // Update the dropdown options.
+                    modelWidget.options.values = newList;
+
+                    // Auto-select the just-uploaded file if present.
+                    if (newList.includes(filename)) {
+                        modelWidget.value = filename;
+                    }
+
+                    node.setDirtyCanvas(true, true);
+                } catch (err) {
+                    console.error("[CameraControl] Failed to refresh dropdown:", err);
                 }
             }
 

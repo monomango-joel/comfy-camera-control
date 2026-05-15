@@ -32,6 +32,34 @@
             color: #888;
             font-size: 13px;
             pointer-events: none;
+            text-align: center;
+            padding: 20px;
+        }
+        #drop-zone {
+            position: absolute;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(80, 140, 255, 0.15);
+            border: 2px dashed #5588ff;
+            color: #88aaff;
+            font-size: 16px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #drop-zone.active { display: flex; }
+        #upload-progress {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: rgba(0,0,0,0.7);
+            color: #aaa;
+            font-size: 10px;
+            padding: 4px 8px;
+            border-radius: 3px;
+            display: none;
+            z-index: 20;
         }
         #camera-hud {
             position: absolute;
@@ -75,7 +103,9 @@
 
 <div id="canvas-container">
     <canvas id="canvas"></canvas>
-    <div id="overlay">Drop a 3D file or run the node to load a model</div>
+    <div id="overlay">Drag a 3D file here to upload<br><span style="font-size:10px;color:#555;margin-top:6px;display:block">.glb .gltf .obj .fbx .stl .ply .spz</span></div>
+    <div id="drop-zone">Drop to upload</div>
+    <div id="upload-progress"></div>
     <div id="camera-hud">
         Az <span id="hud-az">0.0</span>°&nbsp;
         El <span id="hud-el">0.0</span>°&nbsp;
@@ -439,6 +469,82 @@ function animate() {
 animate();
 
 console.log('[CameraControl Viewer] Ready');
+
+// ─── Drag-and-drop upload ─────────────────────────────────────────────────────
+const dropZone    = document.getElementById('drop-zone');
+const progressEl  = document.getElementById('upload-progress');
+const SUPPORTED   = new Set(['glb','gltf','obj','fbx','stl','ply','splat','spz']);
+
+function showProgress(msg) {
+    progressEl.textContent = msg;
+    progressEl.style.display = 'block';
+}
+function hideProgress() {
+    progressEl.style.display = 'none';
+}
+
+async function uploadFile(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!SUPPORTED.has(ext)) {
+        showProgress(`Unsupported: .${ext}`);
+        setTimeout(hideProgress, 3000);
+        return;
+    }
+
+    showProgress(`Uploading ${file.name}…`);
+
+    const fd = new FormData();
+    fd.append('image', file, file.name);   // ComfyUI upload endpoint uses 'image' key
+    fd.append('type', 'input');
+    fd.append('subfolder', '3d');
+    fd.append('overwrite', 'true');
+
+    try {
+        const res = await fetch('/upload/image', { method: 'POST', body: fd });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const uploadedName = data.name;
+
+        showProgress(`Uploaded — loading…`);
+
+        // Tell parent widget: file is ready, refresh the dropdown and load it.
+        window.parent.postMessage({
+            type: 'FILE_UPLOADED',
+            filename: uploadedName,
+        }, '*');
+
+        // Also load it directly in this viewer.
+        const filepath = `/view?filename=${encodeURIComponent(uploadedName)}&type=input&subfolder=3d`;
+        await loadModel(filepath, null);
+        hideProgress();
+    } catch (err) {
+        console.error('[CameraControl Viewer] Upload error:', err);
+        showProgress(`Upload failed: ${err.message}`);
+        setTimeout(hideProgress, 4000);
+    }
+}
+
+// Drag events on the whole document so the drop zone is generous.
+document.addEventListener('dragenter', e => {
+    if (e.dataTransfer?.types.includes('Files')) {
+        dropZone.classList.add('active');
+        e.preventDefault();
+    }
+});
+document.addEventListener('dragover', e => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+});
+document.addEventListener('dragleave', e => {
+    // Only hide when leaving the window entirely.
+    if (!e.relatedTarget) dropZone.classList.remove('active');
+});
+document.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('active');
+    const file = e.dataTransfer?.files?.[0];
+    if (file) uploadFile(file);
+});
 </script>
 </body>
 </html>

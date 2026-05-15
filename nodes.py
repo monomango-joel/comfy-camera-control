@@ -18,7 +18,7 @@ UP_AXIS_QUATERNIONS = {
     "-X": [0, 0, 0.7071068, 0.7071068],   # -90° around Z  (-X → Y)
 }
 
-SUPPORTED_EXTENSIONS = {".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".splat"}
+SUPPORTED_EXTENSIONS = {".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".splat", ".spz"}
 
 
 def get_3d_files():
