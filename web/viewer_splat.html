@@ -130,8 +130,6 @@
 <script type="module">
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 
-console.log('[SplatViewer] GaussianSplats3D loaded:', !!GaussianSplats3D);
-
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
 const container = document.getElementById('viewer-container');
 const overlay   = document.getElementById('overlay');
@@ -140,12 +138,19 @@ const hudAz     = document.getElementById('hud-az');
 const hudEl     = document.getElementById('hud-el');
 const hudDist   = document.getElementById('hud-dist');
 
-// ─── Viewer state ─────────────────────────────────────────────────────────────
-let viewer = null;
+// ─── Viewer — created ONCE ────────────────────────────────────────────────────
+const viewer = new GaussianSplats3D.Viewer({
+    rootElement: container,
+    selfDrivenMode: true,
+    useBuiltInControls: true,
+    ignoreDevicePixelRatio: false,
+    gpuAcceleratedSort: true,
+    webXRMode: GaussianSplats3D.WebXRMode.None,
+});
+viewer.start();
+
 let cameraLocked = false;
-let lastEmittedAz = null, lastEmittedEl = null, lastEmittedDist = null;
 let notifyTimer = null;
-let hudTimer = null;
 
 // ─── Status helper ────────────────────────────────────────────────────────────
 function showStatus(msg, autoHide = false) {
@@ -156,11 +161,9 @@ function showStatus(msg, autoHide = false) {
 
 // ─── Camera spherical helpers ─────────────────────────────────────────────────
 function getCameraSpherical() {
-    if (!viewer) return { azimuth: 0, elevation: 0, distance: 5 };
     const cam = viewer.camera;
     const controls = viewer.controls;
     if (!cam || !controls) return { azimuth: 0, elevation: 0, distance: 5 };
-
     const target = controls.target;
     const dx = cam.position.x - target.x;
     const dy = cam.position.y - target.y;
@@ -172,7 +175,6 @@ function getCameraSpherical() {
 }
 
 function applyCameraPose(az, el, dist) {
-    if (!viewer) return;
     const cam = viewer.camera;
     const controls = viewer.controls;
     if (!cam || !controls) return;
@@ -195,41 +197,15 @@ function updateHUD() {
     hudDist.textContent = s.distance.toFixed(3);
 }
 
-function startHUDLoop() {
-    if (hudTimer) return;
-    hudTimer = setInterval(() => {
-        updateHUD();
-        if (cameraLocked) return;
-        const s = getCameraSpherical();
-        if (s.azimuth === lastEmittedAz && s.elevation === lastEmittedEl && s.distance === lastEmittedDist) return;
-        lastEmittedAz = s.azimuth; lastEmittedEl = s.elevation; lastEmittedDist = s.distance;
-        clearTimeout(notifyTimer);
-        notifyTimer = setTimeout(() => {
-            window.parent.postMessage({ type: 'CAMERA_CHANGED', ...s }, '*');
-        }, 80);
-    }, 100);
-}
-
-// ─── Init viewer ──────────────────────────────────────────────────────────────
-function initViewer() {
-    if (viewer) {
-        viewer.dispose();
-        viewer = null;
-    }
-
-    viewer = new GaussianSplats3D.Viewer({
-        rootElement: container,
-        selfDrivenMode: true,
-        useBuiltInControls: true,
-        ignoreDevicePixelRatio: false,
-        gpuAcceleratedSort: true,
-        enableSplatIndicesAttribute: false,
-        camera: undefined,
-        webXRMode: GaussianSplats3D.WebXRMode.None,
-    });
-
-    startHUDLoop();
-}
+setInterval(() => {
+    updateHUD();
+    if (cameraLocked) return;
+    const s = getCameraSpherical();
+    clearTimeout(notifyTimer);
+    notifyTimer = setTimeout(() => {
+        window.parent.postMessage({ type: 'CAMERA_CHANGED', ...s }, '*');
+    }, 80);
+}, 150);
 
 // ─── Format detection ─────────────────────────────────────────────────────────
 const FORMAT_MAP = {
@@ -240,19 +216,30 @@ const FORMAT_MAP = {
 };
 
 // ─── Load splat ───────────────────────────────────────────────────────────────
-async function loadFromUrl(url, filename) {
+let loadingInProgress = false;
+
+async function loadFromUrl(url, filename, cameraPose) {
+    if (loadingInProgress) return;
+    loadingInProgress = true;
+
     console.log('[SplatViewer] loadFromUrl:', url, 'filename:', filename);
     showStatus(`Loading ${filename}…`);
     overlay.style.display = 'none';
 
     const ext = filename.split('.').pop().toLowerCase();
     const format = FORMAT_MAP[ext];
-    console.log('[SplatViewer] ext:', ext, 'format:', format);
-
-    // Reinitialise viewer for each new file (cleanest way to clear previous splat)
-    initViewer();
+    if (format === undefined) {
+        showStatus(`Unsupported format: .${ext}`, true);
+        loadingInProgress = false;
+        return;
+    }
 
     try {
+        const sceneCount = viewer.getSceneCount ? viewer.getSceneCount() : 0;
+        if (sceneCount > 0) {
+            await viewer.removeSplatScenes(Array.from({ length: sceneCount }, (_, i) => i), false);
+        }
+
         await viewer.addSplatScene(url, {
             splatAlphaRemovalThreshold: 5,
             showLoadingUI: false,
@@ -262,10 +249,12 @@ async function loadFromUrl(url, filename) {
             scale: [1, 1, 1],
         });
 
-        viewer.start();
+        if (cameraPose) {
+            applyCameraPose(cameraPose.azimuth, cameraPose.elevation, cameraPose.distance);
+        } else {
+            applyCameraPose(45, 20, 3);
+        }
 
-        // Default orbit pose
-        applyCameraPose(45, 20, 3);
         showStatus(`Loaded: ${filename}`, true);
         window.parent.postMessage({ type: 'MODEL_LOADED', radius: 1 }, '*');
     } catch (err) {
@@ -274,17 +263,17 @@ async function loadFromUrl(url, filename) {
         overlay.style.display = 'flex';
         statusEl.style.display = 'none';
         window.parent.postMessage({ type: 'MODEL_ERROR', error: err.message }, '*');
+    } finally {
+        loadingInProgress = false;
     }
 }
 
 // ─── Screenshot ───────────────────────────────────────────────────────────────
 function takeScreenshot() {
-    if (!viewer) return;
     const canvas = viewer.renderer?.domElement;
     if (!canvas) return;
-    const dataUrl = canvas.toDataURL('image/png');
     const s = getCameraSpherical();
-    window.parent.postMessage({ type: 'SCREENSHOT', image: dataUrl, ...s }, '*');
+    window.parent.postMessage({ type: 'SCREENSHOT', image: canvas.toDataURL('image/png'), ...s }, '*');
 }
 
 // ─── Drag-and-drop upload ─────────────────────────────────────────────────────
@@ -292,10 +281,8 @@ const dropZone = document.getElementById('drop-zone');
 const SUPPORTED = new Set(['ply', 'splat', 'spz', 'ksplat']);
 
 async function uploadAndLoad(file) {
-    console.log('[SplatViewer] uploadAndLoad:', file.name);
     const ext = file.name.split('.').pop().toLowerCase();
     if (!SUPPORTED.has(ext)) { showStatus(`Unsupported: .${ext}`, true); return; }
-
     showStatus(`Uploading ${file.name}…`);
     const fd = new FormData();
     fd.append('image', file, file.name);
@@ -306,12 +293,10 @@ async function uploadAndLoad(file) {
         const res = await fetch('/upload/image', { method: 'POST', body: fd });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        console.log('[SplatViewer] upload ok, name:', data.name);
         window.parent.postMessage({ type: 'FILE_UPLOADED', filename: data.name }, '*');
         const url = `/view?filename=${encodeURIComponent(data.name)}&type=input&subfolder=3d`;
-        await loadFromUrl(url, file.name);
+        await loadFromUrl(url, file.name, null);
     } catch (err) {
-        console.error('[SplatViewer] upload error:', err);
         showStatus(`Upload failed: ${err.message}`, true);
     }
 }
@@ -325,7 +310,6 @@ document.addEventListener('drop', e => {
     e.preventDefault();
     dropZone.classList.remove('active');
     const file = e.dataTransfer?.files?.[0];
-    console.log('[SplatViewer] drop:', file?.name);
     if (file) uploadAndLoad(file);
 });
 
@@ -333,15 +317,13 @@ document.addEventListener('drop', e => {
 window.addEventListener('message', event => {
     const msg = event.data;
     if (!msg?.type) return;
-
     switch (msg.type) {
         case 'LOAD_MODEL': {
             cameraLocked = !!msg.locked;
-            const filename = new URL(msg.filepath, location.href).searchParams.get('filename')
-                || msg.filepath.split('/').pop();
-            loadFromUrl(msg.filepath, filename).then(() => {
-                if (msg.camera) applyCameraPose(msg.camera.azimuth, msg.camera.elevation, msg.camera.distance);
-            });
+            let filename = '';
+            try { filename = new URL(msg.filepath, location.href).searchParams.get('filename') || ''; } catch(e) {}
+            if (!filename) filename = msg.filepath.split('/').pop().split('?')[0];
+            loadFromUrl(msg.filepath, filename, msg.camera || null);
             break;
         }
         case 'SET_CAMERA': {
