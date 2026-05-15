@@ -360,9 +360,10 @@ async function loadModel(filepath, upQuat) {
             const geo = await loader.loadAsync(filepath);
             const mat = new THREE.MeshStandardMaterial({ color: 0x9ab8cc, side: THREE.DoubleSide });
             object = new THREE.Mesh(geo, mat);
-        } else if (ext === 'ply') {
-            // Gaussian splat .ply — load via gsplat if available, else show placeholder.
-            overlay.textContent = 'Gaussian splat: use gsplat viewer for .ply files';
+        } else if (ext === 'ply' || ext === 'splat' || ext === 'spz') {
+            // Gaussian splat formats — tell parent to switch to the splat viewer.
+            window.parent.postMessage({ type: 'SWITCH_TO_SPLAT_VIEWER', filepath, upQuat }, '*');
+            overlay.textContent = 'Switching to splat viewer…';
             return;
         } else {
             overlay.textContent = `Unsupported format: .${ext}`;

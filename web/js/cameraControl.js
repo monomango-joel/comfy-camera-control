@@ -19,8 +19,14 @@ const EXTENSION_FOLDER = (() => {
     return m ? m[1] : "comfy-camera-control";
 })();
 
-const VIEWER_URL = () =>
-    `/extensions/${EXTENSION_FOLDER}/viewer.html?v=${Date.now()}`;
+const VIEWER_URL       = () => `/extensions/${EXTENSION_FOLDER}/viewer.html?v=${Date.now()}`;
+const SPLAT_VIEWER_URL = () => `/extensions/${EXTENSION_FOLDER}/viewer_splat.html?v=${Date.now()}`;
+const SPLAT_EXTS = new Set(['ply', 'splat', 'spz']);
+
+function isSplatFile(filename) {
+    const ext = (filename || '').split('.').pop().toLowerCase();
+    return SPLAT_EXTS.has(ext);
+}
 
 // ─── Widget dimensions ───────────────────────────────────────────────────────
 const DEFAULT_WIDTH  = 512;
@@ -47,6 +53,7 @@ app.registerExtension({
 
             let iframeReady = false;
             let pendingMsg = null;
+            let currentViewerType = "mesh"; // "mesh" | "splat"
 
             iframe.addEventListener("load", () => {
                 iframeReady = true;
@@ -62,6 +69,17 @@ app.registerExtension({
                 } else {
                     pendingMsg = msg;
                 }
+            }
+
+            function switchViewer(type, msg) {
+                if (currentViewerType === type && iframeReady) {
+                    sendToViewer(msg);
+                    return;
+                }
+                currentViewerType = type;
+                iframeReady = false;
+                pendingMsg = msg;
+                iframe.src = type === "splat" ? SPLAT_VIEWER_URL() : VIEWER_URL();
             }
 
             // ── DOM widget ────────────────────────────────────────────────────
@@ -146,9 +164,18 @@ app.registerExtension({
                 }
 
                 if (msg.type === "FILE_UPLOADED") {
-                    // A file was drag-dropped into the viewer and uploaded to input/3d/.
-                    // Refresh the model_file dropdown and auto-select the new file.
                     refreshModelDropdown(msg.filename).catch(console.error);
+                }
+
+                if (msg.type === "SWITCH_TO_SPLAT_VIEWER") {
+                    // Main mesh viewer detected a splat file — switch iframe to splat viewer.
+                    switchViewer("splat", {
+                        type: "LOAD_MODEL",
+                        filepath: msg.filepath,
+                        upQuat: msg.upQuat || null,
+                        camera: pendingCamera,
+                        locked: false,
+                    });
                 }
             });
 
@@ -200,7 +227,7 @@ app.registerExtension({
                     overrides.distance  !== null
                 );
 
-                sendToViewer({
+                const loadMsg = {
                     type:    "LOAD_MODEL",
                     filepath,
                     upQuat:  cp.up_quat || getUpAxisQuat(),
@@ -208,7 +235,11 @@ app.registerExtension({
                     locked,
                     width,
                     height,
-                });
+                };
+
+                // Route directly to the right viewer based on file extension.
+                const viewerType = isSplatFile(modelFile) ? "splat" : "mesh";
+                switchViewer(viewerType, loadMsg);
 
                 // Resize node to match requested dimensions (keep square-ish).
                 const targetW = Math.max(width, DEFAULT_WIDTH);
