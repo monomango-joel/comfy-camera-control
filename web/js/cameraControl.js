@@ -173,7 +173,7 @@ app.registerExtension({
                         type: "LOAD_MODEL",
                         filepath: msg.filepath,
                         upQuat: msg.upQuat || null,
-                        camera: pendingCamera,
+                        camera: null,
                         locked: false,
                     });
                 }
