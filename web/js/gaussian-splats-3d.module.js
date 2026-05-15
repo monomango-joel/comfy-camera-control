@@ -1,5 +1,5 @@
-import * as THREE from 'three';
-import { Ray as Ray$1, Plane, MathUtils, EventDispatcher, Vector3, MOUSE, TOUCH, Quaternion, Spherical, Vector2 } from 'three';
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js';
+import { Ray as Ray$1, Plane, MathUtils, EventDispatcher, Vector3, MOUSE, TOUCH, Quaternion, Spherical, Vector2 } from 'https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js';
 
 /**
  * AbortablePromise: A quick & dirty wrapper for JavaScript's Promise class that allows the underlying
@@ -4083,7 +4083,7 @@ function deserializePackedGaussians(buffer) {
         console.error('[SPZ ERROR] deserializePackedGaussians: header not found');
         return null;
     }
-    if (header.version < 1 || header.version > 2) {
+    if (header.version < 1 || header.version > 3) {
         console.error(`[SPZ ERROR] deserializePackedGaussians: version not supported: ${header.version}`);
         return null;
     }
@@ -4176,6 +4176,10 @@ class SpzLoader {
                                   outSphericalHarmonicsDegree = 0, sectionSize, sceneCenter, blockSize, bucketSize) {
         await delayedExecute();
         const packed = await loadSpzPacked(spzFileData);
+        if (!packed) {
+            console.error('[SPZ ERROR] loadFromFileData: failed to parse SPZ data (packed is null)');
+            return null;
+        }
         outSphericalHarmonicsDegree = Math.min(packed.shDegree, outSphericalHarmonicsDegree);
 
         const splatArray = new UncompressedSplatArray(outSphericalHarmonicsDegree);

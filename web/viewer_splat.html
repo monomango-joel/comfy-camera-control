@@ -293,22 +293,24 @@ const SUPPORTED = new Set(['ply', 'splat', 'spz', 'ksplat']);
 async function uploadAndLoad(file) {
     const ext = file.name.split('.').pop().toLowerCase();
     if (!SUPPORTED.has(ext)) { showStatus(`Unsupported: .${ext}`, true); return; }
-    showStatus(`Uploading ${file.name}…`);
+
+    // Read bytes immediately — don't wait for upload to load the viewer.
+    const bufferPromise = file.arrayBuffer();
+
+    // Upload in parallel so the file appears in the dropdown.
     const fd = new FormData();
     fd.append('image', file, file.name);
     fd.append('type', 'input');
     fd.append('subfolder', '3d');
     fd.append('overwrite', 'true');
-    try {
-        const res = await fetch('/upload/image', { method: 'POST', body: fd });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        window.parent.postMessage({ type: 'FILE_UPLOADED', filename: data.name }, '*');
-        const url = `/view?filename=${encodeURIComponent(data.name)}&type=input&subfolder=3d`;
-        await loadFromUrl(url, file.name, null);
-    } catch (err) {
-        showStatus(`Upload failed: ${err.message}`, true);
-    }
+    fetch('/upload/image', { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(data => window.parent.postMessage({ type: 'FILE_UPLOADED', filename: data.name }, '*'))
+        .catch(() => {});
+
+    // Load directly from the local file bytes — no server round-trip needed.
+    const buffer = await bufferPromise;
+    await loadFromBuffer(buffer, file.name, null);
 }
 
 document.addEventListener('dragenter', e => {
