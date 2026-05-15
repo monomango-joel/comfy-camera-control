@@ -147,6 +147,8 @@
 </script>
 
 <script type="module">
+import { decompressSpz } from './spz-decoder.js';
+
 const SPLAT = window.GSPLAT;
 if (!SPLAT) {
     document.getElementById('overlay').textContent = 'gsplat-bundle.js not found — check install';
@@ -248,37 +250,6 @@ function showStatus(msg, autoHide = false) {
     statusEl.textContent = msg;
     statusEl.style.display = 'block';
     if (autoHide) setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
-}
-
-// ─── SPZ decoder ─────────────────────────────────────────────────────────────
-// spz is a zstd-compressed binary format from Niantic/Scaniverse.
-// We use the official @niantic-lab/spz WASM package via CDN to decode it to a
-// raw PLY buffer, then feed that into gsplat's PLYLoader.
-
-let spzModule = null;
-
-async function loadSpzDecoder() {
-    if (spzModule) return spzModule;
-    // Load the spz WASM module from jsDelivr CDN.
-    // This is the official Niantic spz decoder compiled to WASM + JS.
-    const { default: initSpz } = await import(
-        'https://cdn.jsdelivr.net/npm/@nianticlabs/spz@1.0.5/dist/spz.js'
-    ).catch(() => ({ default: null }));
-
-    if (!initSpz) {
-        throw new Error('Failed to load spz decoder from CDN. Check your internet connection.');
-    }
-    spzModule = await initSpz();
-    return spzModule;
-}
-
-async function decompressSpz(arrayBuffer) {
-    const mod = await loadSpzDecoder();
-    // spz WASM API: decompress(Uint8Array) → Uint8Array (PLY bytes)
-    const input  = new Uint8Array(arrayBuffer);
-    const result = mod.decompress(input);
-    if (!result || result.length === 0) throw new Error('SPZ decompression returned empty data');
-    return result.buffer;
 }
 
 // ─── Splat loading ────────────────────────────────────────────────────────────
