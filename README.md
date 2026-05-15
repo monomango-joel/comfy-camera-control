@@ -15,7 +15,13 @@ Restart ComfyUI.
 
 ## Supported formats
 
+### Mesh/3D Models
 `.glb`, `.gltf`, `.obj`, `.fbx`, `.stl` — place files in `ComfyUI/input/3d/`
+
+### Gaussian Splats
+`.ply`, `.splat`, `.spz` — place files in `ComfyUI/input/3d/`
+
+**SPZ files** (Niantic Scaniverse format with zstd compression) are automatically decompressed and loaded.
 
 ## Usage
 
@@ -63,8 +69,10 @@ __init__.py          # Registers node + serves web/
 nodes.py             # Python node class (INPUT_TYPES, RETURN_TYPES, execute)
 web/
   viewer.html        # Three.js 3D viewer (iframe, postMessage protocol)
+  viewer_splat.html  # gsplat Gaussian splatting viewer (iframe)
   js/
     cameraControl.js # ComfyUI widget (registers extension, wires iframe)
+    spz-decoder.js   # Shared SPZ decompression utility (Niantic format)
 ```
 
 ### postMessage protocol (parent ↔ iframe)
