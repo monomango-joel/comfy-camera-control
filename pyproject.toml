@@ -1,0 +1,14 @@
+[project]
+name = "comfy-camera-control"
+version = "0.1.0"
+description = "ComfyUI custom node: Load 3D models with API-controllable camera (azimuth, elevation, distance, up-axis)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+repository = "https://github.com/joelmono/comfy-camera-control"
+
+[tool.comfy]
+PublisherId = "joelmono"
+DisplayName = "Camera Control Load 3D"
+Icon = ""

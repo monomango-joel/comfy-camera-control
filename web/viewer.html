@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Camera Control 3D Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1e1e1e;
+            overflow: hidden;
+            font-family: monospace;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        #canvas-container {
+            position: relative;
+            flex: 1;
+            min-height: 0;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #888;
+            font-size: 13px;
+            pointer-events: none;
+        }
+        #camera-hud {
+            position: absolute;
+            bottom: 8px;
+            left: 8px;
+            background: rgba(0,0,0,0.55);
+            color: #aaa;
+            font-size: 10px;
+            padding: 4px 8px;
+            border-radius: 3px;
+            pointer-events: none;
+            line-height: 1.6;
+        }
+        #controls-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #252525;
+            border-top: 1px solid #333;
+            padding: 5px 10px;
+            flex-shrink: 0;
+            font-size: 11px;
+            color: #aaa;
+            flex-wrap: wrap;
+        }
+        #controls-bar button {
+            background: #3a3a3a;
+            border: 1px solid #555;
+            color: #ccc;
+            padding: 3px 8px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+        }
+        #controls-bar button:hover { background: #4a4a4a; }
+        .ctrl-group { display: flex; align-items: center; gap: 5px; }
+        .ctrl-group label { color: #777; font-size: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container">
+    <canvas id="canvas"></canvas>
+    <div id="overlay">Drop a 3D file or run the node to load a model</div>
+    <div id="camera-hud">
+        Az <span id="hud-az">0.0</span>°&nbsp;
+        El <span id="hud-el">0.0</span>°&nbsp;
+        Dist <span id="hud-dist">5.0</span>
+    </div>
+</div>
+
+<div id="controls-bar">
+    <div class="ctrl-group">
+        <button id="btn-reset">Reset View</button>
+        <button id="btn-screenshot">Screenshot</button>
+    </div>
+    <div class="ctrl-group">
+        <label>Bg</label>
+        <input type="color" id="bg-color" value="#1e1e1e" title="Background colour" style="width:28px;height:20px;border:none;cursor:pointer;background:none;">
+    </div>
+    <div class="ctrl-group" id="view-presets">
+        <label>View:</label>
+        <button data-preset="front">F</button>
+        <button data-preset="back">Bk</button>
+        <button data-preset="left">L</button>
+        <button data-preset="right">R</button>
+        <button data-preset="top">T</button>
+        <button data-preset="bottom">Bt</button>
+    </div>
+</div>
+
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+    }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+// ─── Scene setup ─────────────────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const container = document.getElementById('canvas-container');
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1e1e1e);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.001, 10000);
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.zoomSpeed = 1.5;
+controls.minDistance = 0.001;
+controls.maxDistance = 10000;
+
+// Lighting
+const ambient = new THREE.AmbientLight(0xffffff, 0.7);
+scene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(3, 6, 4);
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0xffffff, 0.4);
+fill.position.set(-4, -2, -3);
+scene.add(fill);
+
+// Grid
+const grid = new THREE.GridHelper(10, 20, 0x444444, 0x2a2a2a);
+scene.add(grid);
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let modelRoot = null;         // Group wrapping the loaded model (up-axis applied here)
+let modelCenter = new THREE.Vector3();
+let modelRadius = 1;
+let pendingCamera = null;     // {azimuth, elevation, distance} to apply after load
+let cameraLocked = false;     // true when azimuth/elevation/distance inputs are connected
+
+// ─── Resize ──────────────────────────────────────────────────────────────────
+function resize() {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+}
+const ro = new ResizeObserver(resize);
+ro.observe(container);
+resize();
+
+// ─── Coordinate helpers ──────────────────────────────────────────────────────
+function deg2rad(d) { return d * Math.PI / 180; }
+
+/** Convert spherical (azimuth °, elevation °, distance) around modelCenter to cartesian. */
+function sphericalToCartesian(az, el, dist) {
+    const azR = deg2rad(az);
+    const elR = deg2rad(el);
+    return new THREE.Vector3(
+        modelCenter.x + dist * Math.cos(elR) * Math.sin(azR),
+        modelCenter.y + dist * Math.sin(elR),
+        modelCenter.z + dist * Math.cos(elR) * Math.cos(azR)
+    );
+}
+
+/** Derive azimuth/elevation/distance from current camera & controls. */
+function getCameraSpherical() {
+    const pos = camera.position.clone().sub(controls.target);
+    const dist = pos.length();
+    const el = THREE.MathUtils.radToDeg(Math.asin(Math.max(-1, Math.min(1, pos.y / dist))));
+    const az = THREE.MathUtils.radToDeg(Math.atan2(pos.x, pos.z));
+    return { azimuth: ((az % 360) + 360) % 360, elevation: el, distance: dist };
+}
+
+function applyCameraPose(az, el, dist) {
+    const pos = sphericalToCartesian(az, el, dist);
+    camera.position.copy(pos);
+    controls.target.copy(modelCenter);
+    controls.update();
+}
+
+// ─── HUD ─────────────────────────────────────────────────────────────────────
+const hudAz   = document.getElementById('hud-az');
+const hudEl   = document.getElementById('hud-el');
+const hudDist = document.getElementById('hud-dist');
+
+function updateHUD() {
+    const s = getCameraSpherical();
+    hudAz.textContent   = s.azimuth.toFixed(1);
+    hudEl.textContent   = s.elevation.toFixed(1);
+    hudDist.textContent = s.distance.toFixed(3);
+}
+
+// ─── Camera change → notify parent ──────────────────────────────────────────
+let notifyTimer = null;
+controls.addEventListener('change', () => {
+    updateHUD();
+    if (cameraLocked) return;   // parent is driving; don't echo back
+    clearTimeout(notifyTimer);
+    notifyTimer = setTimeout(() => {
+        const s = getCameraSpherical();
+        window.parent.postMessage({
+            type: 'CAMERA_CHANGED',
+            azimuth:   s.azimuth,
+            elevation: s.elevation,
+            distance:  s.distance,
+        }, '*');
+    }, 80);
+});
+
+// ─── Model loading ───────────────────────────────────────────────────────────
+const overlay = document.getElementById('overlay');
+
+function clearModel() {
+    if (modelRoot) {
+        scene.remove(modelRoot);
+        modelRoot.traverse(c => {
+            if (c.geometry) c.geometry.dispose();
+            if (c.material) {
+                [c.material].flat().forEach(m => m.dispose());
+            }
+        });
+        modelRoot = null;
+    }
+}
+
+function fitModel(object, upQuat) {
+    // Compute bounding box BEFORE applying up-axis rotation so we can center the model.
+    const box = new THREE.Box3().setFromObject(object);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    modelRadius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
+
+    // Wrap in a Group so we can apply up-axis rotation without moving the mesh origin.
+    modelRoot = new THREE.Group();
+    // Apply up-axis quaternion (rotates model so its "up" aligns with +Y).
+    if (upQuat) {
+        modelRoot.quaternion.set(upQuat[0], upQuat[1], upQuat[2], upQuat[3]);
+    }
+    // Translate the inner object so the model centre sits at the Group origin.
+    object.position.sub(center);
+    modelRoot.add(object);
+    scene.add(modelRoot);
+
+    // After rotation the effective centre is at Group origin in world space.
+    modelCenter.set(0, 0, 0);
+
+    // Scale grid to model.
+    const gridScale = modelRadius * 4;
+    grid.scale.setScalar(gridScale / 10);
+
+    return modelRadius;
+}
+
+function postLoadCamera(radius) {
+    if (pendingCamera) {
+        applyCameraPose(pendingCamera.azimuth, pendingCamera.elevation, pendingCamera.distance);
+        pendingCamera = null;
+    } else {
+        // Default: isometric-ish view.
+        applyCameraPose(45, 25, radius * 3.5);
+    }
+    overlay.style.display = 'none';
+    updateHUD();
+    // Notify parent that the model loaded OK.
+    window.parent.postMessage({ type: 'MODEL_LOADED', radius }, '*');
+}
+
+const EXT_MAP = {
+    glb: 'glb', gltf: 'gltf',
+    obj: 'obj',
+    fbx: 'fbx',
+    stl: 'stl',
+    ply: 'ply',
+    splat: 'splat',
+};
+
+async function loadModel(filepath, upQuat) {
+    overlay.textContent = 'Loading…';
+    overlay.style.display = 'flex';
+    clearModel();
+
+    const ext = filepath.split('?')[0].split('.').pop().toLowerCase();
+
+    try {
+        let object;
+
+        if (ext === 'glb' || ext === 'gltf') {
+            const loader = new GLTFLoader();
+            const gltf = await loader.loadAsync(filepath);
+            object = gltf.scene;
+        } else if (ext === 'obj') {
+            const loader = new OBJLoader();
+            object = await loader.loadAsync(filepath);
+            // Apply a default material if faces are untextured.
+            object.traverse(c => {
+                if (c.isMesh && !c.material.map) {
+                    c.material = new THREE.MeshStandardMaterial({ color: 0x9ab8cc });
+                }
+            });
+        } else if (ext === 'fbx') {
+            const loader = new FBXLoader();
+            object = await loader.loadAsync(filepath);
+        } else if (ext === 'stl') {
+            const loader = new STLLoader();
+            const geo = await loader.loadAsync(filepath);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x9ab8cc, side: THREE.DoubleSide });
+            object = new THREE.Mesh(geo, mat);
+        } else if (ext === 'ply') {
+            // Gaussian splat .ply — load via gsplat if available, else show placeholder.
+            overlay.textContent = 'Gaussian splat: use gsplat viewer for .ply files';
+            return;
+        } else {
+            overlay.textContent = `Unsupported format: .${ext}`;
+            return;
+        }
+
+        const radius = fitModel(object, upQuat);
+        postLoadCamera(radius);
+    } catch (err) {
+        console.error('[CameraControl Viewer] Load error:', err);
+        overlay.textContent = 'Load error — check console';
+        overlay.style.color = '#f66';
+        window.parent.postMessage({ type: 'MODEL_ERROR', error: err.message }, '*');
+    }
+}
+
+// ─── Screenshot ──────────────────────────────────────────────────────────────
+function takeScreenshot() {
+    renderer.render(scene, camera);
+    const dataUrl = canvas.toDataURL('image/png');
+    const s = getCameraSpherical();
+    window.parent.postMessage({
+        type: 'SCREENSHOT',
+        image: dataUrl,
+        azimuth:   s.azimuth,
+        elevation: s.elevation,
+        distance:  s.distance,
+    }, '*');
+}
+
+// ─── View presets ────────────────────────────────────────────────────────────
+const PRESETS = {
+    front:  { az:   0, el: 0 },
+    back:   { az: 180, el: 0 },
+    right:  { az:  90, el: 0 },
+    left:   { az: 270, el: 0 },
+    top:    { az:   0, el: 89.9 },
+    bottom: { az:   0, el: -89.9 },
+};
+
+document.getElementById('view-presets').addEventListener('click', e => {
+    const preset = e.target.dataset.preset;
+    if (!preset) return;
+    const p = PRESETS[preset];
+    applyCameraPose(p.az, p.el, modelRadius * 3.5);
+    updateHUD();
+});
+
+// ─── Toolbar ─────────────────────────────────────────────────────────────────
+document.getElementById('btn-reset').addEventListener('click', () => {
+    applyCameraPose(45, 25, modelRadius * 3.5);
+    updateHUD();
+});
+document.getElementById('btn-screenshot').addEventListener('click', takeScreenshot);
+document.getElementById('bg-color').addEventListener('input', e => {
+    scene.background = new THREE.Color(e.target.value);
+});
+
+// ─── postMessage API ─────────────────────────────────────────────────────────
+window.addEventListener('message', event => {
+    const msg = event.data;
+    if (!msg || !msg.type) return;
+
+    switch (msg.type) {
+        case 'LOAD_MODEL': {
+            // msg = { filepath, upQuat, camera: {azimuth, elevation, distance} | null, locked: bool }
+            if (msg.camera) pendingCamera = msg.camera;
+            cameraLocked = !!msg.locked;
+            loadModel(msg.filepath, msg.upQuat || null);
+            break;
+        }
+        case 'SET_CAMERA': {
+            // Programmatic camera update without reloading the model.
+            // msg = { azimuth, elevation, distance, locked }
+            cameraLocked = !!msg.locked;
+            if (modelRoot) {
+                applyCameraPose(msg.azimuth, msg.elevation, msg.distance);
+                updateHUD();
+            } else {
+                pendingCamera = { azimuth: msg.azimuth, elevation: msg.elevation, distance: msg.distance };
+            }
+            break;
+        }
+        case 'SET_UP_AXIS': {
+            // Reapply up-axis quaternion to existing model without reloading.
+            if (modelRoot && msg.upQuat) {
+                modelRoot.quaternion.set(msg.upQuat[0], msg.upQuat[1], msg.upQuat[2], msg.upQuat[3]);
+            }
+            break;
+        }
+        case 'TAKE_SCREENSHOT': {
+            takeScreenshot();
+            break;
+        }
+    }
+});
+
+// ─── Render loop ─────────────────────────────────────────────────────────────
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+animate();
+
+console.log('[CameraControl Viewer] Ready');
+</script>
+</body>
+</html>
