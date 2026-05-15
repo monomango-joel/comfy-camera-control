@@ -334,7 +334,8 @@ async function loadModel(filepath, upQuat) {
     overlay.style.display = 'flex';
     clearModel();
 
-    const ext = filepath.split('?')[0].split('.').pop().toLowerCase();
+    const filenameParam = new URL(filepath, location.href).searchParams.get('filename') || filepath;
+    const ext = filenameParam.split('?')[0].split('.').pop().toLowerCase();
 
     try {
         let object;
