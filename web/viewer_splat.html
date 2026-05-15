@@ -406,7 +406,7 @@ window.addEventListener('message', event => {
                 // Store pose to apply after load.
                 window._pendingCamera = msg.camera;
             }
-            const filename = msg.filepath.split('/').pop().split('?')[0];
+            const filename = new URL(msg.filepath, location.href).searchParams.get('filename') || msg.filepath.split('/').pop().split('?')[0];
             loadFromUrl(msg.filepath, filename).then(() => {
                 if (window._pendingCamera) {
                     const c = window._pendingCamera;
