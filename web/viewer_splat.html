@@ -231,11 +231,23 @@ function initViewer() {
     startHUDLoop();
 }
 
+// ─── Format detection ─────────────────────────────────────────────────────────
+const FORMAT_MAP = {
+    'ply':    GaussianSplats3D.SceneFormat.Ply,
+    'splat':  GaussianSplats3D.SceneFormat.Splat,
+    'spz':    GaussianSplats3D.SceneFormat.Spz,
+    'ksplat': GaussianSplats3D.SceneFormat.KSplat,
+};
+
 // ─── Load splat ───────────────────────────────────────────────────────────────
 async function loadFromUrl(url, filename) {
     console.log('[SplatViewer] loadFromUrl:', url, 'filename:', filename);
     showStatus(`Loading ${filename}…`);
     overlay.style.display = 'none';
+
+    const ext = filename.split('.').pop().toLowerCase();
+    const format = FORMAT_MAP[ext];
+    console.log('[SplatViewer] ext:', ext, 'format:', format);
 
     // Reinitialise viewer for each new file (cleanest way to clear previous splat)
     initViewer();
@@ -244,6 +256,7 @@ async function loadFromUrl(url, filename) {
         await viewer.addSplatScene(url, {
             splatAlphaRemovalThreshold: 5,
             showLoadingUI: false,
+            format,
             position: [0, 0, 0],
             rotation: [0, 0, 0, 1],
             scale: [1, 1, 1],
