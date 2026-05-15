@@ -58,27 +58,28 @@ app.registerExtension({
             iframe.addEventListener("load", () => {
                 iframeReady = true;
                 if (pendingMsg) {
-                    iframe.contentWindow?.postMessage(pendingMsg, "*");
+                    iframe.contentWindow?.postMessage(pendingMsg.msg, "*", pendingMsg.transfer || []);
                     pendingMsg = null;
                 }
             });
 
-            function sendToViewer(msg) {
+            function sendToViewer(msg, transfer = []) {
+                if (!msg) return;
                 if (iframeReady && iframe.contentWindow) {
-                    iframe.contentWindow.postMessage(msg, "*");
+                    iframe.contentWindow.postMessage(msg, "*", transfer);
                 } else {
-                    pendingMsg = msg;
+                    pendingMsg = { msg, transfer };
                 }
             }
 
-            function switchViewer(type, msg) {
+            function switchViewer(type, msg, transfer = []) {
                 if (currentViewerType === type && iframeReady) {
-                    sendToViewer(msg);
+                    sendToViewer(msg, transfer);
                     return;
                 }
                 currentViewerType = type;
                 iframeReady = false;
-                pendingMsg = msg;
+                pendingMsg = msg ? { msg, transfer } : null;
                 iframe.src = type === "splat" ? SPLAT_VIEWER_URL() : VIEWER_URL();
             }
 
@@ -239,7 +240,27 @@ app.registerExtension({
 
                 // Route directly to the right viewer based on file extension.
                 const viewerType = isSplatFile(modelFile) ? "splat" : "mesh";
-                switchViewer(viewerType, loadMsg);
+
+                if (viewerType === "splat") {
+                    // Fetch in the parent frame (already authenticated, no CORS issues)
+                    // then pass ArrayBuffer directly to avoid a second round-trip in the iframe.
+                    switchViewer("splat", null);  // switch iframe first, data comes separately
+                    fetch(filepath)
+                        .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
+                        .then(buf => {
+                            const dataMsg = {
+                                type:     "LOAD_MODEL_DATA",
+                                data:     buf,
+                                filename: modelFile,
+                                camera:   loadMsg.camera,
+                                locked:   loadMsg.locked,
+                            };
+                            sendToViewer(dataMsg, [buf]);
+                        })
+                        .catch(err => console.error("[CameraControl] Failed to fetch splat:", err));
+                } else {
+                    switchViewer(viewerType, loadMsg);
+                }
 
                 // Resize node to match requested dimensions (keep square-ish).
                 const targetW = Math.max(width, DEFAULT_WIDTH);

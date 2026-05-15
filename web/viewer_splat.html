@@ -217,6 +217,16 @@ const FORMAT_MAP = {
 
 // ─── Load splat ───────────────────────────────────────────────────────────────
 let loadingInProgress = false;
+let currentBlobUrl = null;
+
+async function loadFromBuffer(buffer, filename, cameraPose) {
+    // Wrap ArrayBuffer in a blob URL so the library can fetch it normally.
+    if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+    const ext = filename.split('.').pop().toLowerCase();
+    const mime = ext === 'spz' ? 'application/octet-stream' : 'application/octet-stream';
+    currentBlobUrl = URL.createObjectURL(new Blob([buffer], { type: mime }));
+    await loadFromUrl(currentBlobUrl, filename, cameraPose);
+}
 
 async function loadFromUrl(url, filename, cameraPose) {
     if (loadingInProgress) return;
@@ -318,6 +328,12 @@ window.addEventListener('message', event => {
     const msg = event.data;
     if (!msg?.type) return;
     switch (msg.type) {
+        case 'LOAD_MODEL_DATA': {
+            // ArrayBuffer sent directly from parent — fastest path, no re-fetch needed.
+            cameraLocked = !!msg.locked;
+            loadFromBuffer(msg.data, msg.filename, msg.camera || null);
+            break;
+        }
         case 'LOAD_MODEL': {
             cameraLocked = !!msg.locked;
             let filename = '';
