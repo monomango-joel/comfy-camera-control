@@ -18,10 +18,9 @@
             flex: 1;
             min-height: 0;
         }
-        canvas {
-            width: 100%;
-            height: 100%;
-            display: block;
+        #viewer-container canvas {
+            width: 100% !important;
+            height: 100% !important;
         }
         #overlay {
             position: absolute;
@@ -101,9 +100,8 @@
 <body>
 
 <div id="viewer-container">
-    <canvas id="canvas"></canvas>
-    <div id="overlay">Drag a .ply / .spz file here, or load via the node</div>
-    <div id="drop-zone">Drop to upload</div>
+    <div id="overlay">Drag a .ply / .splat / .spz file here, or load via the node</div>
+    <div id="drop-zone">Drop to load</div>
     <div id="camera-hud">
         Az <span id="hud-az">0.0</span>°&nbsp;
         El <span id="hud-el">0.0</span>°&nbsp;
@@ -117,112 +115,76 @@
         <button id="btn-reset">Reset View</button>
         <button id="btn-screenshot">Screenshot</button>
     </div>
-    <div class="ctrl-group">
-        <label>Scale:</label>
-        <input type="range" id="scale-slider" min="0.1" max="5" step="0.05" value="1"
-               style="width:80px;" title="Gaussian scale multiplier">
-        <span id="scale-val">1.0</span>
-    </div>
 </div>
 
-<!-- gsplat.js bundle — copied from comfyui-geometrypack at startup -->
-<script>
-// Try local bundle first; if missing fall back to CDN.
-(function() {
-    var s = document.createElement('script');
-    s.src = './js/gsplat-bundle.js';
-    s.onerror = function() {
-        console.warn('[SplatViewer] Local gsplat-bundle.js not found, trying CDN...');
-        var cdn = document.createElement('script');
-        // Inline minimal GSPLAT shim — not ideal but prevents hard failure.
-        // The CDN version of gsplat is ESM-only so we can't easily load it as a
-        // global. Log a clear error instead.
-        cdn.textContent = 'console.error("[SplatViewer] gsplat-bundle.js missing. ' +
-            'Install comfyui-geometrypack or restart ComfyUI to copy the bundle.");' +
-            'window.GSPLAT = null;';
-        document.head.appendChild(cdn);
-    };
-    document.head.appendChild(s);
-})();
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/",
+        "@mkkellogg/gaussian-splats-3d": "./js/gaussian-splats-3d.module.js"
+    }
+}
 </script>
 
 <script type="module">
-import { decompressSpz } from './spz-decoder.js';
+import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
 
-const SPLAT = window.GSPLAT;
-if (!SPLAT) {
-    document.getElementById('overlay').textContent = 'gsplat-bundle.js not found — check install';
-}
+console.log('[SplatViewer] GaussianSplats3D loaded:', !!GaussianSplats3D);
 
-// ─── DOM refs ────────────────────────────────────────────────────────────────
-const canvas      = document.getElementById('canvas');
-const overlay     = document.getElementById('overlay');
-const statusEl    = document.getElementById('status');
-const hudAz       = document.getElementById('hud-az');
-const hudEl       = document.getElementById('hud-el');
-const hudDist     = document.getElementById('hud-dist');
-const scaleSlider = document.getElementById('scale-slider');
-const scaleVal    = document.getElementById('scale-val');
+// ─── DOM refs ─────────────────────────────────────────────────────────────────
+const container = document.getElementById('viewer-container');
+const overlay   = document.getElementById('overlay');
+const statusEl  = document.getElementById('status');
+const hudAz     = document.getElementById('hud-az');
+const hudEl     = document.getElementById('hud-el');
+const hudDist   = document.getElementById('hud-dist');
 
-// ─── gsplat scene ────────────────────────────────────────────────────────────
-let scene, camera, renderer, controls, animId;
-let currentSplat = null;
-let originalScales = null;
-let currentScale = 1.0;
+// ─── Viewer state ─────────────────────────────────────────────────────────────
+let viewer = null;
+let cameraLocked = false;
+let lastEmittedAz = null, lastEmittedEl = null, lastEmittedDist = null;
+let notifyTimer = null;
+let hudTimer = null;
 
-function initViewer() {
-    scene    = new SPLAT.Scene();
-    camera   = new SPLAT.Camera();
-    renderer = new SPLAT.WebGLRenderer(canvas);
-    controls = new SPLAT.OrbitControls(camera, canvas);
-
-    const resize = () => renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-    window.addEventListener('resize', resize);
-    resize();
-
-    const frame = () => {
-        controls.update();
-        renderer.render(scene, camera);
-        animId = requestAnimationFrame(frame);
-        emitCameraIfChanged();
-    };
-    frame();
+// ─── Status helper ────────────────────────────────────────────────────────────
+function showStatus(msg, autoHide = false) {
+    statusEl.textContent = msg;
+    statusEl.style.display = 'block';
+    if (autoHide) setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
 }
 
 // ─── Camera spherical helpers ─────────────────────────────────────────────────
-// gsplat OrbitControls exposes camera.position and a target (orbit center).
-// We derive azimuth/elevation/distance from those.
-
-let lastEmittedAz = null, lastEmittedEl = null, lastEmittedDist = null;
-let cameraLocked = false;
-let notifyTimer = null;
-
 function getCameraSpherical() {
-    if (!camera || !controls) return { azimuth: 0, elevation: 0, distance: 5 };
+    if (!viewer) return { azimuth: 0, elevation: 0, distance: 5 };
+    const cam = viewer.camera;
+    const controls = viewer.controls;
+    if (!cam || !controls) return { azimuth: 0, elevation: 0, distance: 5 };
 
-    // OrbitControls stores target as controls._target or similar; fall back to origin.
-    const tx = controls._target?.x ?? 0;
-    const ty = controls._target?.y ?? 0;
-    const tz = controls._target?.z ?? 0;
-
-    const dx = camera.position.x - tx;
-    const dy = camera.position.y - ty;
-    const dz = camera.position.z - tz;
+    const target = controls.target;
+    const dx = cam.position.x - target.x;
+    const dy = cam.position.y - target.y;
+    const dz = cam.position.z - target.z;
     const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) || 1;
-
     const el = Math.asin(Math.max(-1, Math.min(1, dy / dist))) * 180 / Math.PI;
-    const az = (Math.atan2(dx, dz) * 180 / Math.PI + 360) % 360;
+    const az = ((Math.atan2(dx, dz) * 180 / Math.PI) + 360) % 360;
     return { azimuth: az, elevation: el, distance: dist };
 }
 
 function applyCameraPose(az, el, dist) {
-    if (!camera || !controls) return;
-    const azR = az  * Math.PI / 180;
-    const elR = el  * Math.PI / 180;
-    camera.position.x = dist * Math.cos(elR) * Math.sin(azR);
-    camera.position.y = dist * Math.sin(elR);
-    camera.position.z = dist * Math.cos(elR) * Math.cos(azR);
-    controls.setCameraTarget(new SPLAT.Vector3(0, 0, 0));
+    if (!viewer) return;
+    const cam = viewer.camera;
+    const controls = viewer.controls;
+    if (!cam || !controls) return;
+    const azR = az * Math.PI / 180;
+    const elR = el * Math.PI / 180;
+    cam.position.set(
+        dist * Math.cos(elR) * Math.sin(azR),
+        dist * Math.sin(elR),
+        dist * Math.cos(elR) * Math.cos(azR)
+    );
+    controls.target.set(0, 0, 0);
+    controls.update();
     updateHUD();
 }
 
@@ -233,138 +195,94 @@ function updateHUD() {
     hudDist.textContent = s.distance.toFixed(3);
 }
 
-function emitCameraIfChanged() {
-    if (cameraLocked) return;
-    const s = getCameraSpherical();
-    if (s.azimuth === lastEmittedAz && s.elevation === lastEmittedEl && s.distance === lastEmittedDist) return;
-    lastEmittedAz = s.azimuth; lastEmittedEl = s.elevation; lastEmittedDist = s.distance;
-    updateHUD();
-    clearTimeout(notifyTimer);
-    notifyTimer = setTimeout(() => {
-        window.parent.postMessage({ type: 'CAMERA_CHANGED', ...s }, '*');
-    }, 80);
+function startHUDLoop() {
+    if (hudTimer) return;
+    hudTimer = setInterval(() => {
+        updateHUD();
+        if (cameraLocked) return;
+        const s = getCameraSpherical();
+        if (s.azimuth === lastEmittedAz && s.elevation === lastEmittedEl && s.distance === lastEmittedDist) return;
+        lastEmittedAz = s.azimuth; lastEmittedEl = s.elevation; lastEmittedDist = s.distance;
+        clearTimeout(notifyTimer);
+        notifyTimer = setTimeout(() => {
+            window.parent.postMessage({ type: 'CAMERA_CHANGED', ...s }, '*');
+        }, 80);
+    }, 100);
 }
 
-// ─── Status helper ────────────────────────────────────────────────────────────
-function showStatus(msg, autoHide = false) {
-    statusEl.textContent = msg;
-    statusEl.style.display = 'block';
-    if (autoHide) setTimeout(() => { statusEl.style.display = 'none'; }, 3000);
+// ─── Init viewer ──────────────────────────────────────────────────────────────
+function initViewer() {
+    if (viewer) {
+        viewer.dispose();
+        viewer = null;
+    }
+
+    viewer = new GaussianSplats3D.Viewer({
+        rootElement: container,
+        selfDrivenMode: true,
+        useBuiltInControls: true,
+        ignoreDevicePixelRatio: false,
+        gpuAcceleratedSort: true,
+        enableSplatIndicesAttribute: false,
+        camera: undefined,
+        webXRMode: GaussianSplats3D.WebXRMode.None,
+    });
+
+    startHUDLoop();
 }
 
-// ─── Splat loading ────────────────────────────────────────────────────────────
-async function loadFromArrayBuffer(buffer, filename) {
+// ─── Load splat ───────────────────────────────────────────────────────────────
+async function loadFromUrl(url, filename) {
+    console.log('[SplatViewer] loadFromUrl:', url, 'filename:', filename);
     showStatus(`Loading ${filename}…`);
     overlay.style.display = 'none';
 
-    // Clear existing splat.
-    if (scene.objects?.length > 0) {
-        while (scene.objects.length > 0) scene.removeObject(scene.objects[0]);
-    }
-    currentSplat = null;
-    originalScales = null;
+    // Reinitialise viewer for each new file (cleanest way to clear previous splat)
+    initViewer();
 
     try {
-        const ext = filename.split('.').pop().toLowerCase();
-        let plyBuffer = buffer;
+        await viewer.addSplatScene(url, {
+            splatAlphaRemovalThreshold: 5,
+            showLoadingUI: false,
+            position: [0, 0, 0],
+            rotation: [0, 0, 0, 1],
+            scale: [1, 1, 1],
+        });
 
-        if (ext === 'spz') {
-            showStatus('Decompressing .spz…');
-            plyBuffer = await decompressSpz(buffer);
-            showStatus('Loading splat…');
-        }
+        viewer.start();
 
-        // Load PLY bytes into gsplat via blob URL.
-        const blob    = new Blob([plyBuffer], { type: 'application/octet-stream' });
-        const blobUrl = URL.createObjectURL(blob);
-        await SPLAT.PLYLoader.LoadAsync(blobUrl, scene);
-        URL.revokeObjectURL(blobUrl);
-
-        if (scene.objects?.length > 0) {
-            currentSplat = scene.objects[scene.objects.length - 1];
-            storeOriginalScales();
-        }
-
-        // Auto-fit camera.
-        fitCamera();
+        // Default orbit pose
+        applyCameraPose(45, 20, 3);
         showStatus(`Loaded: ${filename}`, true);
         window.parent.postMessage({ type: 'MODEL_LOADED', radius: 1 }, '*');
     } catch (err) {
         console.error('[SplatViewer] Load error:', err);
         overlay.textContent = `Error: ${err.message}`;
         overlay.style.display = 'flex';
-        showStatus('', false);
         statusEl.style.display = 'none';
         window.parent.postMessage({ type: 'MODEL_ERROR', error: err.message }, '*');
     }
 }
 
-async function loadFromUrl(url, filename) {
-    showStatus(`Fetching ${filename}…`);
-    try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = await res.arrayBuffer();
-        await loadFromArrayBuffer(buf, filename);
-    } catch (err) {
-        console.error('[SplatViewer] Fetch error:', err);
-        overlay.textContent = `Fetch error: ${err.message}`;
-        overlay.style.display = 'flex';
-        statusEl.style.display = 'none';
-    }
-}
-
-// ─── Camera auto-fit ─────────────────────────────────────────────────────────
-function fitCamera() {
-    // Default orbit distance. Gaussian splats tend to be unit-scale after training.
-    applyCameraPose(45, 20, 3);
-}
-
-// ─── Scale control ────────────────────────────────────────────────────────────
-function storeOriginalScales() {
-    if (!currentSplat?.data?.scales) return;
-    originalScales = new Float32Array(currentSplat.data.scales);
-}
-
-function applyScale(factor) {
-    if (!currentSplat?.data?.scales || !originalScales) return;
-    const s = currentSplat.data.scales;
-    for (let i = 0; i < s.length; i++) s[i] = originalScales[i] * factor;
-    currentSplat.data.changed = true;
-    // Force re-add to flush GPU state.
-    scene.removeObject(currentSplat);
-    scene.addObject(currentSplat);
-}
-
-scaleSlider.addEventListener('input', e => {
-    const v = parseFloat(e.target.value);
-    scaleVal.textContent = v.toFixed(2);
-    currentScale = v;
-    applyScale(v);
-});
-
 // ─── Screenshot ───────────────────────────────────────────────────────────────
 function takeScreenshot() {
-    if (animId) cancelAnimationFrame(animId);
-    controls.update();
-    renderer.render(scene, camera);
+    if (!viewer) return;
+    const canvas = viewer.renderer?.domElement;
+    if (!canvas) return;
     const dataUrl = canvas.toDataURL('image/png');
     const s = getCameraSpherical();
     window.parent.postMessage({ type: 'SCREENSHOT', image: dataUrl, ...s }, '*');
-    // Resume loop.
-    const frame = () => { controls.update(); renderer.render(scene, camera); animId = requestAnimationFrame(frame); emitCameraIfChanged(); };
-    frame();
 }
 
 // ─── Drag-and-drop upload ─────────────────────────────────────────────────────
 const dropZone = document.getElementById('drop-zone');
-const SUPPORTED = new Set(['ply','splat','spz']);
+const SUPPORTED = new Set(['ply', 'splat', 'spz', 'ksplat']);
 
 async function uploadAndLoad(file) {
+    console.log('[SplatViewer] uploadAndLoad:', file.name);
     const ext = file.name.split('.').pop().toLowerCase();
-    if (!SUPPORTED.has(ext)) {
-        showStatus(`Unsupported: .${ext}`, true); return;
-    }
+    if (!SUPPORTED.has(ext)) { showStatus(`Unsupported: .${ext}`, true); return; }
+
     showStatus(`Uploading ${file.name}…`);
     const fd = new FormData();
     fd.append('image', file, file.name);
@@ -375,22 +293,26 @@ async function uploadAndLoad(file) {
         const res = await fetch('/upload/image', { method: 'POST', body: fd });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+        console.log('[SplatViewer] upload ok, name:', data.name);
         window.parent.postMessage({ type: 'FILE_UPLOADED', filename: data.name }, '*');
-        // Load directly from the uploaded ArrayBuffer we already have.
-        const buf = await file.arrayBuffer();
-        await loadFromArrayBuffer(buf, file.name);
+        const url = `/view?filename=${encodeURIComponent(data.name)}&type=input&subfolder=3d`;
+        await loadFromUrl(url, file.name);
     } catch (err) {
+        console.error('[SplatViewer] upload error:', err);
         showStatus(`Upload failed: ${err.message}`, true);
     }
 }
 
-document.addEventListener('dragenter', e => { if (e.dataTransfer?.types.includes('Files')) { dropZone.classList.add('active'); e.preventDefault(); } });
-document.addEventListener('dragover',  e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+document.addEventListener('dragenter', e => {
+    if (e.dataTransfer?.types.includes('Files')) { dropZone.classList.add('active'); e.preventDefault(); }
+});
+document.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
 document.addEventListener('dragleave', e => { if (!e.relatedTarget) dropZone.classList.remove('active'); });
 document.addEventListener('drop', e => {
     e.preventDefault();
     dropZone.classList.remove('active');
     const file = e.dataTransfer?.files?.[0];
+    console.log('[SplatViewer] drop:', file?.name);
     if (file) uploadAndLoad(file);
 });
 
@@ -402,17 +324,10 @@ window.addEventListener('message', event => {
     switch (msg.type) {
         case 'LOAD_MODEL': {
             cameraLocked = !!msg.locked;
-            if (msg.camera) {
-                // Store pose to apply after load.
-                window._pendingCamera = msg.camera;
-            }
-            const filename = new URL(msg.filepath, location.href).searchParams.get('filename') || msg.filepath.split('/').pop().split('?')[0];
+            const filename = new URL(msg.filepath, location.href).searchParams.get('filename')
+                || msg.filepath.split('/').pop();
             loadFromUrl(msg.filepath, filename).then(() => {
-                if (window._pendingCamera) {
-                    const c = window._pendingCamera;
-                    applyCameraPose(c.azimuth, c.elevation, c.distance);
-                    window._pendingCamera = null;
-                }
+                if (msg.camera) applyCameraPose(msg.camera.azimuth, msg.camera.elevation, msg.camera.distance);
             });
             break;
         }
@@ -429,11 +344,9 @@ window.addEventListener('message', event => {
 });
 
 // ─── Controls bar ─────────────────────────────────────────────────────────────
-document.getElementById('btn-reset').addEventListener('click', fitCamera);
+document.getElementById('btn-reset').addEventListener('click', () => applyCameraPose(45, 20, 3));
 document.getElementById('btn-screenshot').addEventListener('click', takeScreenshot);
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
-if (SPLAT) initViewer();
 console.log('[SplatViewer] Ready');
 </script>
 </body>
