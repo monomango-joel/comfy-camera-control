@@ -68,18 +68,20 @@ class CameraControlLoad3D:
                                         "tooltip": "Camera distance from the model centre"}),
             },
             "hidden": {
-                # The JS widget writes the live interactive camera pose into this
-                # hidden input before execution so it round-trips through the server.
+                # Live camera pose written by JS widget before each execution.
                 "camera_widget_state": ("STRING", {"default": "{}"}),
+                # Preview screenshot filename uploaded by JS after each model load.
+                "preview_image": ("STRING", {"default": ""}),
             },
         }
 
     def load_3d(self, model_file, width, height, up_axis,
                 azimuth=None, elevation=None, distance=None,
-                camera_widget_state="{}"):
+                camera_widget_state="{}", preview_image=""):
         import json
         import torch
         import numpy as np
+        from PIL import Image
 
         input_dir = folder_paths.get_input_directory()
         model_path = os.path.join(input_dir, "3d", model_file)
@@ -95,17 +97,24 @@ class CameraControlLoad3D:
         final_elevation = elevation if elevation is not None else float(state.get("elevation", 20.0))
         final_distance  = distance  if distance  is not None else float(state.get("distance",   5.0))
 
-        # The actual render is done by the JS iframe widget and sent back as a
-        # screenshot blob.  On the Python side we return a placeholder black
-        # image so the node output is always a valid IMAGE tensor regardless of
-        # whether the workflow is running headless.  When the browser is open the
-        # real screenshot tensor is injected via the ui dict (see below).
-        placeholder = torch.zeros((1, height, width, 3), dtype=torch.float32)
+        # Try to load the preview screenshot captured by the JS widget.
+        # Falls back to a black placeholder when running headless or before first load.
+        image_tensor = None
+        if preview_image:
+            preview_path = os.path.join(input_dir, preview_image)
+            if os.path.exists(preview_path):
+                try:
+                    img = Image.open(preview_path).convert("RGB").resize((width, height))
+                    arr = np.array(img).astype(np.float32) / 255.0
+                    image_tensor = torch.from_numpy(arr).unsqueeze(0)
+                except Exception:
+                    pass
+
+        if image_tensor is None:
+            image_tensor = torch.zeros((1, height, width, 3), dtype=torch.float32)
 
         return {
             "ui": {
-                # Tells the JS widget which file to load and what camera pose to
-                # apply.  The widget picks these up in onExecuted().
                 "model_file":    [model_file],
                 "model_path":    [model_path],
                 "camera_params": [{
@@ -118,7 +127,7 @@ class CameraControlLoad3D:
                 "width":  [width],
                 "height": [height],
             },
-            "result": (placeholder, final_azimuth, final_elevation, final_distance, model_path),
+            "result": (image_tensor, final_azimuth, final_elevation, final_distance, model_path),
         }
 
 

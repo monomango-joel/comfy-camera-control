@@ -6,6 +6,8 @@
  *  - Bidirectional camera sync:
  *      interactive drag → updates hidden widget state → flows as node outputs
  *      API-supplied azimuth/elevation/distance inputs → posted into the iframe
+ *  - Auto-preview: after each model load the viewer sends a screenshot which is
+ *      uploaded as cc3d-preview-{nodeId}.png so Python can return a real IMAGE tensor
  */
 
 import { app } from "../../../scripts/app.js";
@@ -104,16 +106,15 @@ app.registerExtension({
 
             node.setSize([DEFAULT_WIDTH, DEFAULT_WIDTH + CONTROLS_HEIGHT + NODE_PADDING + 60]);
 
-            // ── Hidden state widget ───────────────────────────────────────────
-            // Stores the live camera pose so it round-trips as a node input.
-            // We look it up by name to avoid index fragility.
+            // ── Hidden state widgets ──────────────────────────────────────────
             function getCameraStateWidget() {
                 return node.widgets?.find(w => w.name === "camera_widget_state");
             }
+            function getPreviewImageWidget() {
+                return node.widgets?.find(w => w.name === "preview_image");
+            }
 
             // ── Read current API input values ────────────────────────────────
-            // Returns {azimuth, elevation, distance} from the named widgets if
-            // they exist and are connected, otherwise returns null per field.
             function getInputOverrides() {
                 const azW   = node.widgets?.find(w => w.name === "azimuth");
                 const elW   = node.widgets?.find(w => w.name === "elevation");
@@ -139,16 +140,69 @@ app.registerExtension({
                 return UP_QUATS[upW.value] || null;
             }
 
-            // ── Messages from iframe → update state widget ────────────────────
+            // ── Screenshot helpers ────────────────────────────────────────────
+            async function blobFromDataUrl(dataUrl) {
+                const base64 = dataUrl.split(",")[1];
+                const bytes  = atob(base64);
+                const buf    = new Uint8Array(bytes.length);
+                for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
+                return new Blob([buf], { type: "image/png" });
+            }
+
+            // Upload a screenshot to the output directory (button-triggered).
+            async function uploadOutputScreenshot(dataUrl) {
+                const blob = await blobFromDataUrl(dataUrl);
+                const ts   = new Date().toISOString().replace(/[:.]/g, "-");
+                const fd   = new FormData();
+                fd.append("image",     blob, `camera-control-${ts}.png`);
+                fd.append("type",      "output");
+                fd.append("subfolder", "");
+                await fetch("/upload/image", { method: "POST", body: fd });
+            }
+
+            // Upload a preview screenshot to input so Python can read it back.
+            // Returns the server-assigned filename.
+            async function uploadPreviewScreenshot(dataUrl) {
+                const blob     = await blobFromDataUrl(dataUrl);
+                const filename = `cc3d-preview-${node.id}.png`;
+                const fd       = new FormData();
+                fd.append("image",     blob, filename);
+                fd.append("type",      "input");
+                fd.append("subfolder", "");
+                fd.append("overwrite", "true");
+                try {
+                    const resp = await fetch("/upload/image", { method: "POST", body: fd });
+                    if (!resp.ok) return null;
+                    const data = await resp.json();
+                    const savedName = data.name || filename;
+                    const pw = getPreviewImageWidget();
+                    if (pw) pw.value = savedName;
+                    return savedName;
+                } catch {
+                    return null;
+                }
+            }
+
+            // Take a screenshot from the viewer, then call the given handler.
+            // oneShot=true means the SCREENSHOT message is intercepted before
+            // the general handler so only one upload happens.
+            let screenshotHandler = null;  // null = route to output; fn = intercept
+
+            function takePreviewScreenshot() {
+                screenshotHandler = (dataUrl) => {
+                    screenshotHandler = null;
+                    uploadPreviewScreenshot(dataUrl).catch(console.error);
+                };
+                sendToViewer({ type: "TAKE_SCREENSHOT" });
+            }
+
+            // ── Messages from iframe ──────────────────────────────────────────
             window.addEventListener("message", event => {
                 const msg = event.data;
                 if (!msg || !msg.type) return;
-
-                // Only handle messages from our own viewer iframe.
                 if (event.source !== iframe.contentWindow) return;
 
                 if (msg.type === "CAMERA_CHANGED") {
-                    // Interactive camera drag — store pose in hidden widget.
                     const sw = getCameraStateWidget();
                     if (sw) {
                         sw.value = JSON.stringify({
@@ -160,8 +214,18 @@ app.registerExtension({
                 }
 
                 if (msg.type === "SCREENSHOT") {
-                    // Forward screenshot to ComfyUI upload endpoint.
-                    uploadScreenshot(msg.image).catch(console.error);
+                    if (screenshotHandler) {
+                        screenshotHandler(msg.image);
+                    } else {
+                        // Button-triggered: save to output directory.
+                        uploadOutputScreenshot(msg.image).catch(console.error);
+                    }
+                }
+
+                if (msg.type === "MODEL_LOADED") {
+                    // Viewer finished loading — capture a preview for Python.
+                    // Small delay so the first frame is rendered.
+                    setTimeout(takePreviewScreenshot, 500);
                 }
 
                 if (msg.type === "FILE_UPLOADED") {
@@ -169,34 +233,15 @@ app.registerExtension({
                 }
 
                 if (msg.type === "SWITCH_TO_SPLAT_VIEWER") {
-                    // Main mesh viewer detected a splat file — switch iframe to splat viewer.
                     switchViewer("splat", {
-                        type: "LOAD_MODEL",
+                        type:     "LOAD_MODEL",
                         filepath: msg.filepath,
-                        upQuat: msg.upQuat || null,
-                        camera: null,
-                        locked: false,
+                        upQuat:   msg.upQuat || null,
+                        camera:   null,
+                        locked:   false,
                     });
                 }
             });
-
-            // ── Screenshot upload ─────────────────────────────────────────────
-            async function uploadScreenshot(dataUrl) {
-                const base64 = dataUrl.split(",")[1];
-                const bytes  = atob(base64);
-                const buf    = new Uint8Array(bytes.length);
-                for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
-                const blob = new Blob([buf], { type: "image/png" });
-
-                const ts       = new Date().toISOString().replace(/[:.]/g, "-");
-                const filename = `camera-control-${ts}.png`;
-                const fd       = new FormData();
-                fd.append("image", blob, filename);
-                fd.append("type", "output");
-                fd.append("subfolder", "");
-
-                await fetch("/upload/image", { method: "POST", body: fd });
-            }
 
             // ── onExecuted: node ran → push new model + camera into viewer ───
             const onExecuted = node.onExecuted;
@@ -212,7 +257,6 @@ app.registerExtension({
 
                 const filepath = `/view?filename=${encodeURIComponent(modelFile)}&type=input&subfolder=3d`;
 
-                // Build camera pose: explicit API inputs > server-returned params.
                 const overrides = getInputOverrides();
                 const cp = cameraParams || {};
                 const camPose = {
@@ -221,7 +265,6 @@ app.registerExtension({
                     distance:  overrides.distance  ?? cp.distance  ?? 5,
                 };
 
-                // Any of azimuth/elevation/distance connected = camera is API-driven.
                 const locked = (
                     overrides.azimuth   !== null ||
                     overrides.elevation !== null ||
@@ -238,37 +281,31 @@ app.registerExtension({
                     height,
                 };
 
-                // Route directly to the right viewer based on file extension.
                 const viewerType = isSplatFile(modelFile) ? "splat" : "mesh";
 
                 if (viewerType === "splat") {
-                    // Fetch in the parent frame (already authenticated, no CORS issues)
-                    // then pass ArrayBuffer directly to avoid a second round-trip in the iframe.
-                    switchViewer("splat", null);  // switch iframe first, data comes separately
+                    switchViewer("splat", null);
                     fetch(filepath)
                         .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.arrayBuffer(); })
                         .then(buf => {
-                            const dataMsg = {
+                            sendToViewer({
                                 type:     "LOAD_MODEL_DATA",
                                 data:     buf,
                                 filename: modelFile,
                                 camera:   loadMsg.camera,
                                 locked:   loadMsg.locked,
-                            };
-                            sendToViewer(dataMsg, [buf]);
+                            }, [buf]);
                         })
                         .catch(err => console.error("[CameraControl] Failed to fetch splat:", err));
                 } else {
                     switchViewer(viewerType, loadMsg);
                 }
 
-                // Resize node to match requested dimensions (keep square-ish).
                 const targetW = Math.max(width, DEFAULT_WIDTH);
                 node.setSize([targetW, targetW + CONTROLS_HEIGHT + NODE_PADDING + 60]);
             };
 
-            // ── Widget value changes (up_axis, azimuth, etc.) → live update ──
-            // Re-send SET_CAMERA / SET_UP_AXIS without reloading.
+            // ── Widget value changes → live camera sync ───────────────────────
             const origConfigure = node.configure;
             node.configure = function (data) {
                 origConfigure?.apply(this, arguments);
@@ -283,7 +320,6 @@ app.registerExtension({
 
             function viewerSync() {
                 const overrides = getInputOverrides();
-                // Only push if we have real values (widget exists).
                 if (overrides.azimuth !== null || overrides.elevation !== null || overrides.distance !== null) {
                     const sw = getCameraStateWidget();
                     let state = {};
@@ -306,7 +342,6 @@ app.registerExtension({
             // ── Dropdown refresh after drag-and-drop upload ───────────────────
             async function refreshModelDropdown(filename) {
                 try {
-                    // Ask ComfyUI for the current file list for this input type.
                     const res = await fetch("/object_info/CameraControlLoad3D");
                     if (!res.ok) return;
                     const info = await res.json();
@@ -316,21 +351,16 @@ app.registerExtension({
                     const modelWidget = node.widgets?.find(w => w.name === "model_file");
                     if (!modelWidget) return;
 
-                    // Update the dropdown options.
                     modelWidget.options.values = newList;
-
-                    // Auto-select the just-uploaded file if present.
                     if (newList.includes(filename)) {
                         modelWidget.value = filename;
                     }
-
                     node.setDirtyCanvas(true, true);
                 } catch (err) {
                     console.error("[CameraControl] Failed to refresh dropdown:", err);
                 }
             }
 
-            // Watch widget changes so live camera updates work during editing.
             const originalOnWidgetChanged = node.onWidgetChanged;
             node.onWidgetChanged = function (name, value, oldValue, widget) {
                 originalOnWidgetChanged?.apply(this, arguments);
