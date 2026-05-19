@@ -1,140 +1,137 @@
+import math
 import os
 import folder_paths
+from pathlib import Path
+from typing_extensions import override
+
+import nodes
+from comfy_api.latest import IO, InputImpl, Types
 
 
-# Up-axis rotation matrices applied to the scene root so camera math is always consistent.
-# These rotate the model so "world up" matches the chosen axis.
-UP_AXIS_OPTIONS = ["+Y", "-Y", "+Z", "-Z", "+X", "-X"]
+SUPPORTED_EXTENSIONS = {".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".splat", ".spz", ".ksplat"}
 
-# Maps each up-axis choice to a quaternion [x, y, z, w] that rotates
-# that axis to +Y (Three.js default up).  Sent to the JS viewer via
-# the postMessage protocol and applied to the model root object.
-UP_AXIS_QUATERNIONS = {
-    "+Y": [0, 0, 0, 1],           # identity — model already Y-up
-    "-Y": [0, 0, 1, 0],           # 180° around Z
-    "+Z": [0.7071068, 0, 0, 0.7071068],   # -90° around X  (Z → Y)
-    "-Z": [-0.7071068, 0, 0, 0.7071068],  # +90° around X  (-Z → Y)
-    "+X": [0, 0, -0.7071068, 0.7071068],  # +90° around Z  (X → Y)
-    "-X": [0, 0, 0.7071068, 0.7071068],   # -90° around Z  (-X → Y)
-}
 
-SUPPORTED_EXTENSIONS = {".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".splat", ".spz"}
+def normalize_path(path):
+    return path.replace("\\", "/")
 
 
 def get_3d_files():
-    input_dir = folder_paths.get_input_directory()
-    model_dir = os.path.join(input_dir, "3d")
-    os.makedirs(model_dir, exist_ok=True)
-    files = []
-    for f in os.listdir(model_dir):
-        if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS:
-            files.append(f)
+    input_dir = os.path.join(folder_paths.get_input_directory(), "3d")
+    os.makedirs(input_dir, exist_ok=True)
+    base = Path(folder_paths.get_input_directory())
+    files = [
+        normalize_path(str(p.relative_to(base)))
+        for p in Path(input_dir).rglob("*")
+        if p.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
     return sorted(files) if files else ["none"]
 
 
-class CameraControlLoad3D:
-    """
-    Load a 3D model and expose its camera pose (azimuth, elevation, distance)
-    as workflow values so external API callers can control the viewpoint without
-    touching the UI.
+def camera_info_to_spherical(camera_info):
+    """Convert {position, target, zoom} → (azimuth°, elevation°, distance)."""
+    if not camera_info:
+        return 0.0, 20.0, 5.0
+    pos = camera_info.get("position") or {}
+    tgt = camera_info.get("target") or {}
+    dx = pos.get("x", 0.0) - tgt.get("x", 0.0)
+    dy = pos.get("y", 0.0) - tgt.get("y", 0.0)
+    dz = pos.get("z", 0.0) - tgt.get("z", 0.0)
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+    elevation = math.degrees(math.asin(max(-1.0, min(1.0, dy / dist))))
+    azimuth = (math.degrees(math.atan2(dx, dz)) + 360.0) % 360.0
+    return azimuth, elevation, dist
 
-    Camera inputs are optional overrides. When connected they drive the viewer;
-    when left at default the interactive viewer pose is used instead.
-    """
 
-    CATEGORY = "3D/Camera"
-    FUNCTION = "load_3d"
-    RETURN_TYPES = ("IMAGE", "FLOAT", "FLOAT", "FLOAT", "STRING")
-    RETURN_NAMES = ("image", "azimuth", "elevation", "distance", "model_path")
-    OUTPUT_NODE = True
+class CameraControlLoad3D(IO.ComfyNode):
+    """Load a 3D model with programmatic camera control on top of the native Load3D viewer.
+
+    The native widget handles file loading (incl. SPZ v3), rendering, and screenshot
+    capture. JS-side wiring pushes azimuth/elevation/distance overrides into the
+    viewer; this node reads back the resulting camera state for downstream outputs.
+    """
 
     @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "model_file": (get_3d_files(), {"tooltip": "3D file from ComfyUI/input/3d/"}),
-                "width":  ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8}),
-                "height": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 8}),
-                "up_axis": (UP_AXIS_OPTIONS, {"default": "+Y", "tooltip": "Which axis in the source model points up"}),
-            },
-            "optional": {
-                # When these are connected the viewer is locked to them;
-                # the interactive camera widget is overridden.
-                "azimuth":   ("FLOAT", {"default": 0.0,  "min": 0.0,   "max": 360.0, "step": 0.1,
-                                        "tooltip": "Horizontal rotation in degrees (0 = front, 90 = right)"}),
-                "elevation": ("FLOAT", {"default": 20.0, "min": -90.0, "max": 90.0,  "step": 0.1,
-                                        "tooltip": "Vertical angle in degrees (0 = horizon, 90 = top)"}),
-                "distance":  ("FLOAT", {"default": 5.0,  "min": 0.01,  "max": 1000.0,"step": 0.01,
-                                        "tooltip": "Camera distance from the model centre"}),
-            },
-            "hidden": {
-                # Live camera pose written by JS widget before each execution.
-                "camera_widget_state": ("STRING", {"default": "{}"}),
-                # Preview screenshot filename uploaded by JS after each model load.
-                "preview_image": ("STRING", {"default": ""}),
-            },
-        }
+    def fingerprint_inputs(cls, **kwargs):
+        # Re-execute every queue so a fresh screenshot from the viewer is used.
+        import time
+        return str(time.time())
 
-    def load_3d(self, model_file, width, height, up_axis,
-                azimuth=None, elevation=None, distance=None,
-                camera_widget_state="{}", preview_image=""):
-        import json
+    @classmethod
+    @override
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="CameraControlLoad3D",
+            display_name="Load 3D (Camera Control)",
+            category="3D/Camera",
+            inputs=[
+                IO.Combo.Input("model_file", options=get_3d_files(),
+                               upload=IO.UploadType.model,
+                               tooltip="3D file (glb/gltf/obj/fbx/stl/ply/splat/spz)"),
+                IO.Load3D.Input("image"),
+                IO.Int.Input("width", default=512, min=64, max=4096, step=8),
+                IO.Int.Input("height", default=512, min=64, max=4096, step=8),
+                IO.Float.Input("azimuth", default=0.0, min=0.0, max=360.0, step=0.1,
+                               optional=True,
+                               tooltip="Horizontal rotation (0=front, 90=right)"),
+                IO.Float.Input("elevation", default=20.0, min=-90.0, max=90.0, step=0.1,
+                               optional=True,
+                               tooltip="Vertical angle (0=horizon, 90=top)"),
+                IO.Float.Input("distance", default=5.0, min=0.01, max=1000.0, step=0.01,
+                               optional=True,
+                               tooltip="Normalized camera distance (1 = bounding-sphere radius)"),
+            ],
+            outputs=[
+                IO.Image.Output(display_name="image"),
+                IO.Float.Output(display_name="azimuth"),
+                IO.Float.Output(display_name="elevation"),
+                IO.Float.Output(display_name="distance"),
+                IO.String.Output(display_name="model_path"),
+                IO.File3DAny.Output(display_name="model_3d"),
+            ],
+        )
+
+    @classmethod
+    @override
+    def execute(cls, model_file, image, width, height,
+                azimuth=None, elevation=None, distance=None) -> IO.NodeOutput:
         import torch
-        import numpy as np
-        from PIL import Image
 
-        input_dir = folder_paths.get_input_directory()
-        model_path = os.path.join(input_dir, "3d", model_file)
+        # The native Load3D widget normally produces a dict:
+        #   {image, mask, normal, camera_info, recording?}
+        # Defensive handling: an old workflow or unconfigured widget may pass
+        # a bare string (model file) or None — fall back to a black tensor.
+        print(f"[CameraControl] execute: model_file={model_file!r}, image type={type(image).__name__}, value={image!r}")
 
-        # Resolve camera values: explicit inputs beat the widget state.
-        state = {}
-        try:
-            state = json.loads(camera_widget_state) if camera_widget_state else {}
-        except Exception:
-            pass
+        if isinstance(image, dict):
+            image_field = image.get("image", "")
+            camera_info = image.get("camera_info")
+        else:
+            image_field = ""
+            camera_info = None
 
-        final_azimuth   = azimuth   if azimuth   is not None else float(state.get("azimuth",   0.0))
-        final_elevation = elevation if elevation is not None else float(state.get("elevation", 20.0))
-        final_distance  = distance  if distance  is not None else float(state.get("distance",   5.0))
+        output_image = None
+        if image_field:
+            try:
+                image_path = folder_paths.get_annotated_filepath(image_field)
+                load_image = nodes.LoadImage()
+                output_image, _ = load_image.load_image(image=image_path)
+            except Exception as e:
+                print(f"[CameraControl] failed to load preview image '{image_field}': {e}")
 
-        # Try to load the preview screenshot captured by the JS widget.
-        # Falls back to a black placeholder when running headless or before first load.
-        image_tensor = None
-        if preview_image:
-            preview_path = os.path.join(input_dir, preview_image)
-            if os.path.exists(preview_path):
-                try:
-                    img = Image.open(preview_path).convert("RGB").resize((width, height))
-                    arr = np.array(img).astype(np.float32) / 255.0
-                    image_tensor = torch.from_numpy(arr).unsqueeze(0)
-                except Exception:
-                    pass
+        if output_image is None:
+            output_image = torch.zeros((1, height, width, 3), dtype=torch.float32)
 
-        if image_tensor is None:
-            image_tensor = torch.zeros((1, height, width, 3), dtype=torch.float32)
+        out_az, out_el, out_dist = camera_info_to_spherical(camera_info)
 
-        return {
-            "ui": {
-                "model_file":    [model_file],
-                "model_path":    [model_path],
-                "camera_params": [{
-                    "azimuth":   final_azimuth,
-                    "elevation": final_elevation,
-                    "distance":  final_distance,
-                    "up_axis":   up_axis,
-                    "up_quat":   UP_AXIS_QUATERNIONS[up_axis],
-                }],
-                "width":  [width],
-                "height": [height],
-            },
-            "result": (image_tensor, final_azimuth, final_elevation, final_distance, model_path),
-        }
+        final_az = azimuth if azimuth is not None else out_az
+        final_el = elevation if elevation is not None else out_el
+        final_dist = distance if distance is not None else out_dist
+
+        model_path = folder_paths.get_annotated_filepath(model_file)
+        file_3d = Types.File3D(model_path)
+
+        return IO.NodeOutput(output_image, final_az, final_el, final_dist, model_path, file_3d)
 
 
-NODE_CLASS_MAPPINGS = {
-    "CameraControlLoad3D": CameraControlLoad3D,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "CameraControlLoad3D": "Load 3D (Camera Control)",
-}
+NODE_CLASS_MAPPINGS = {"CameraControlLoad3D": CameraControlLoad3D}
+NODE_DISPLAY_NAME_MAPPINGS = {"CameraControlLoad3D": "Load 3D (Camera Control)"}

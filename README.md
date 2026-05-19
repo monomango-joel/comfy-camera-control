@@ -1,3 +1,5 @@
+# DEPRICIATED
+
 # comfy-camera-control
 
 ComfyUI custom node: **Load 3D (Camera Control)**
